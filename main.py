@@ -7,6 +7,7 @@ import numpy as np
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+from requests import Session
 from streamlit.errors import StreamlitSecretNotFoundError
 from youtube_transcript_api import (
     NoTranscriptFound,
@@ -22,14 +23,38 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 
 
-def get_openai_api_key():
+def get_config_value(key):
     try:
-        if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
+        if key in st.secrets:
+            return st.secrets[key]
     except StreamlitSecretNotFoundError:
         pass
 
-    return os.getenv("OPENAI_API_KEY")
+    return os.getenv(key)
+
+
+def get_openai_api_key():
+    return get_config_value("OPENAI_API_KEY")
+
+
+def create_youtube_transcript_api():
+    http_proxy = get_config_value("YOUTUBE_PROXY_HTTP")
+    https_proxy = get_config_value("YOUTUBE_PROXY_HTTPS")
+    verify_ssl = str(get_config_value("YOUTUBE_VERIFY_SSL") or "true").lower() != "false"
+
+    http_client = Session()
+    http_client.verify = verify_ssl
+
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+
+    if proxies:
+        http_client.proxies.update(proxies)
+
+    return YouTubeTranscriptApi(http_client=http_client)
 
 
 def extract_video_id(youtube_url):
@@ -53,10 +78,10 @@ def extract_video_id(youtube_url):
 def fetch_transcript(video_id, language):
     languages = [language, "en"] if language != "en" else ["en"]
 
-    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+    try:
+        transcript = create_youtube_transcript_api().fetch(video_id, languages=languages)
+    except TypeError:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-    else:
-        transcript = YouTubeTranscriptApi().fetch(video_id, languages=languages)
 
     transcript_parts = []
     for item in transcript:
