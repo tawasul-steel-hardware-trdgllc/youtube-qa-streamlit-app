@@ -302,4 +302,4 @@ if "chunks" in st.session_state:
                 st.write(chunk)
 else:
     st.info("Enter a YouTube URL and load the transcript to start chatting.")
-```
+
