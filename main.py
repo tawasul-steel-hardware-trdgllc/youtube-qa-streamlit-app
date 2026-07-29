@@ -1,5 +1,6 @@
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -22,6 +23,7 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 EMBEDDING_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 
+
 class TranscriptSession(Session):
     def __init__(self, verify_ssl=True):
         super().__init__()
@@ -30,6 +32,7 @@ class TranscriptSession(Session):
     def request(self, method, url, **kwargs):
         kwargs["verify"] = self.verify
         return super().request(method, url, **kwargs)
+
 
 def get_config_value(key):
     try:
@@ -45,20 +48,45 @@ def get_openai_api_key():
     return get_config_value("OPENAI_API_KEY")
 
 
-def create_youtube_transcript_api():
+def get_youtube_request_settings():
     http_proxy = get_config_value("YOUTUBE_PROXY_HTTP")
     https_proxy = get_config_value("YOUTUBE_PROXY_HTTPS")
     verify_ssl = str(get_config_value("YOUTUBE_VERIFY_SSL") or "true").lower() != "false"
-
-    http_client = Session()
-    http_client.verify = verify_ssl
-    http_client = TranscriptSession(verify_ssl=verify_ssl)
 
     proxies = {}
     if http_proxy:
         proxies["http"] = http_proxy
     if https_proxy:
         proxies["https"] = https_proxy
+
+    return proxies, verify_ssl
+
+
+@contextmanager
+def youtube_request_settings():
+    proxies, verify_ssl = get_youtube_request_settings()
+    original_request = Session.request
+
+    def patched_request(session, method, url, **kwargs):
+        kwargs["verify"] = verify_ssl
+
+        if proxies:
+            request_proxies = kwargs.get("proxies") or {}
+            request_proxies.update(proxies)
+            kwargs["proxies"] = request_proxies
+
+        return original_request(session, method, url, **kwargs)
+
+    Session.request = patched_request
+    try:
+        yield
+    finally:
+        Session.request = original_request
+
+
+def create_youtube_transcript_api():
+    proxies, verify_ssl = get_youtube_request_settings()
+    http_client = TranscriptSession(verify_ssl=verify_ssl)
 
     if proxies:
         http_client.proxies.update(proxies)
@@ -87,10 +115,11 @@ def extract_video_id(youtube_url):
 def fetch_transcript(video_id, language):
     languages = [language, "en"] if language != "en" else ["en"]
 
-    try:
-        transcript = create_youtube_transcript_api().fetch(video_id, languages=languages)
-    except TypeError:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+    with youtube_request_settings():
+        try:
+            transcript = create_youtube_transcript_api().fetch(video_id, languages=languages)
+        except TypeError:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
 
     transcript_parts = []
     for item in transcript:
@@ -273,3 +302,4 @@ if "chunks" in st.session_state:
                 st.write(chunk)
 else:
     st.info("Enter a YouTube URL and load the transcript to start chatting.")
+```
