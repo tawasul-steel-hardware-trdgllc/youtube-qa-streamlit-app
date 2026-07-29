@@ -22,6 +22,14 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 EMBEDDING_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 
+class TranscriptSession(Session):
+    def __init__(self, verify_ssl=True):
+        super().__init__()
+        self.verify = verify_ssl
+
+    def request(self, method, url, **kwargs):
+        kwargs["verify"] = self.verify
+        return super().request(method, url, **kwargs)
 
 def get_config_value(key):
     try:
@@ -44,6 +52,7 @@ def create_youtube_transcript_api():
 
     http_client = Session()
     http_client.verify = verify_ssl
+    http_client = TranscriptSession(verify_ssl=verify_ssl)
 
     proxies = {}
     if http_proxy:
