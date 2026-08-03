@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,11 +24,27 @@ load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 EMBEDDING_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 
+# Browser-like headers to avoid YouTube bot detection (499 errors)
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Referer": "https://www.youtube.com/",
+    "Origin": "https://www.youtube.com",
+}
+
 
 class TranscriptSession(Session):
     def __init__(self, verify_ssl=True):
         super().__init__()
         self.verify = verify_ssl
+        self.headers.update(BROWSER_HEADERS)
 
     def request(self, method, url, **kwargs):
         kwargs["verify"] = self.verify
@@ -63,8 +80,10 @@ def get_youtube_request_settings():
 
 
 @contextmanager
-def youtube_request_settings():
+def youtube_request_settings(use_proxy=True):
     proxies, verify_ssl = get_youtube_request_settings()
+    if not use_proxy:
+        proxies = {}
     original_request = Session.request
 
     def patched_request(session, method, url, **kwargs):
@@ -84,8 +103,10 @@ def youtube_request_settings():
         Session.request = original_request
 
 
-def create_youtube_transcript_api():
+def create_youtube_transcript_api(use_proxy=True):
     proxies, verify_ssl = get_youtube_request_settings()
+    if not use_proxy:
+        proxies = {}
     http_client = TranscriptSession(verify_ssl=verify_ssl)
 
     if proxies:
@@ -115,23 +136,42 @@ def extract_video_id(youtube_url):
 def fetch_transcript(video_id, language):
     languages = [language, "en"] if language != "en" else ["en"]
 
-    with youtube_request_settings():
-        try:
-            transcript = create_youtube_transcript_api().fetch(video_id, languages=languages)
-        except TypeError:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+    # If a proxy is configured, try it first; otherwise go straight to direct.
+    # YouTube often blocks datacenter proxy IPs (499 error), so we fall back
+    # to a direct connection if the proxy fails.
+    proxies, _ = get_youtube_request_settings()
+    strategies = [True, False] if proxies else [False]
 
-    transcript_parts = []
-    for item in transcript:
-        if isinstance(item, dict):
-            text = item.get("text")
-        else:
-            text = getattr(item, "text", None)
+    last_error = None
+    for use_proxy in strategies:
+        for attempt in range(3):
+            try:
+                with youtube_request_settings(use_proxy=use_proxy):
+                    try:
+                        transcript = create_youtube_transcript_api(use_proxy=use_proxy).fetch(
+                            video_id, languages=languages
+                        )
+                    except TypeError:
+                        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
 
-        if text:
-            transcript_parts.append(text)
+                transcript_parts = []
+                for item in transcript:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                    else:
+                        text = getattr(item, "text", None)
 
-    return " ".join(transcript_parts)
+                    if text:
+                        transcript_parts.append(text)
+
+                return " ".join(transcript_parts)
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(2**attempt)  # exponential backoff: 1s, 2s
+                continue
+
+    raise last_error
 
 
 def chunk_text(text, max_words=350, overlap_words=60):
@@ -302,4 +342,3 @@ if "chunks" in st.session_state:
                 st.write(chunk)
 else:
     st.info("Enter a YouTube URL and load the transcript to start chatting.")
-
